@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const VALID_FORMATS = ['jpeg', 'png', 'webp', 'gif', 'avif', 'tiff'] as const;
+export const VALID_FORMATS = ['jpeg', 'jpg', 'png', 'webp', 'gif', 'avif', 'tiff'] as const;
 export type SupportedFormat = typeof VALID_FORMATS[number];
 
 export const optimizeSchema = z.object({

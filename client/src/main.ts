@@ -7,6 +7,7 @@ const elements = {
   form: document.getElementById('optimizerForm') as HTMLFormElement,
   imageInput: document.getElementById('imageInput') as HTMLInputElement,
   imageName: document.getElementById('imageName') as HTMLInputElement,
+  nameInputWrapper: document.getElementById('nameInputWrapper') as HTMLDivElement,
   imageFormat: document.getElementById('imageFormat') as HTMLSelectElement,
   settingsArea: document.getElementById('settingsArea') as HTMLDivElement,
   errorBanner: document.getElementById('errorBanner') as HTMLDivElement,
@@ -24,6 +25,7 @@ const elements = {
   ] as HTMLButtonElement[],
   loadingSpinner: document.getElementById('loadingSpinner') as unknown as SVGElement,
   imagePreview: document.getElementById('imagePreview') as HTMLImageElement,
+  previewGrid: document.getElementById('previewGrid') as HTMLDivElement,
   uploadIcon: document.getElementById('uploadIcon') as HTMLDivElement,
   uploadText: document.getElementById('uploadText') as HTMLParagraphElement,
   uploadSubtext: document.getElementById('uploadSubtext') as HTMLParagraphElement,
@@ -86,7 +88,6 @@ const UI = {
     target.classList.remove('hidden');
     other.classList.add('hidden');
 
-    // Smoothly focus the banner for screen readers
     setTimeout(() => target.focus(), 100);
   },
 
@@ -99,10 +100,11 @@ const UI = {
     elements.form.reset();
     elements.imagePreview.src = '';
     elements.imagePreview.classList.add('hidden');
+    elements.previewGrid.innerHTML = '';
+    elements.previewGrid.classList.add('hidden');
+    elements.nameInputWrapper.classList.remove('hidden');
     [elements.uploadIcon, elements.uploadText, elements.uploadSubtext].forEach(el => el.classList.remove('hidden'));
     this.clearToasts();
-
-    // Return focus to the start of the flow
     elements.imageInput.focus();
   }
 };
@@ -116,12 +118,12 @@ const API = {
 
     if (!response.ok) {
       const data = await response.json().catch(() => ({}));
-      throw new Error(data.error || 'The server failed to optimize this image.');
+      throw new Error(data.error || 'The server failed to optimize.');
     }
 
     return {
       blob: await response.blob(),
-      filename: Utils.parseFilenameFromHeader(response.headers.get('content-disposition'), 'optimized-image')
+      filename: Utils.parseFilenameFromHeader(response.headers.get('content-disposition'), 'optimized.zip')
     };
   }
 };
@@ -130,67 +132,89 @@ const API = {
  * 5. Event Listeners & Orchestration
  */
 
-// File selection & Auto-population
-elements.imageInput.addEventListener('change', (e) => {
-  const file = (e.target as HTMLInputElement).files?.[0];
+elements.imageInput.addEventListener('change', async (e) => {
+  const files = (e.target as HTMLInputElement).files;
 
-  if (!file) {
+  if (!files || files.length === 0) {
     UI.reset();
     return;
   }
 
   UI.clearToasts();
+  elements.previewGrid.innerHTML = '';
+  [elements.uploadIcon, elements.uploadText, elements.uploadSubtext].forEach(el => el.classList.add('hidden'));
 
-  const reader = new FileReader();
-  reader.onload = (ev) => {
-    elements.imagePreview.src = ev.target?.result as string;
-    elements.imagePreview.classList.remove('hidden');
-    [elements.uploadIcon, elements.uploadText, elements.uploadSubtext].forEach(el => el.classList.add('hidden'));
-  };
-  reader.readAsDataURL(file);
+  if (files.length === 1) {
+    const file = files[0];
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      elements.imagePreview.src = ev.target?.result as string;
+      elements.imagePreview.classList.remove('hidden');
+      elements.previewGrid.classList.add('hidden');
+    };
+    reader.readAsDataURL(file);
 
-  const parts = file.name.split('.');
-  const ext = parts.pop()?.toLowerCase() || '';
-  elements.imageName.value = parts.join('.');
+    const parts = file.name.split('.');
+    const ext = parts.pop()?.toLowerCase() || '';
+    elements.imageName.value = parts.join('.');
+    elements.nameInputWrapper.classList.remove('hidden');
 
-  const supported = Array.from(elements.imageFormat.options).map(o => o.value);
-  elements.imageFormat.value = supported.includes(ext) ? ext : '';
+    const supported = Array.from(elements.imageFormat.options).map(o => o.value);
+    elements.imageFormat.value = supported.includes(ext) ? ext : '';
+  } else {
+    elements.imagePreview.classList.add('hidden');
+    elements.previewGrid.classList.remove('hidden');
+    elements.nameInputWrapper.classList.add('hidden');
+
+    for (const file of Array.from(files)) {
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        const img = document.createElement('img');
+        img.src = ev.target?.result as string;
+        img.className = 'w-full h-20 object-cover rounded shadow-sm';
+        elements.previewGrid.appendChild(img);
+      };
+      reader.readAsDataURL(file);
+    }
+  }
 });
 
-// Reset Buttons
 elements.resetButtons.forEach(btn => btn?.addEventListener('click', () => UI.reset()));
-
-// Close Banner Buttons
 elements.closeButtons.forEach(btn => btn?.addEventListener('click', () => UI.clearToasts()));
 
-// Submit Handling
 elements.form.addEventListener('submit', async (e) => {
   e.preventDefault();
 
-  const file = elements.imageInput.files?.[0];
-  if (!file) return UI.showToast('error', 'Please select an image first.');
+  const files = elements.imageInput.files;
+  if (!files || files.length === 0) return UI.showToast('error', 'Please select images first.');
 
   UI.clearToasts();
   UI.setLoading(true);
 
   try {
     const formData = new FormData();
-    formData.append('image', file);
-    if (elements.imageName.value.trim()) formData.append('name', elements.imageName.value.trim());
-    if (elements.imageFormat.value) formData.append('format', elements.imageFormat.value);
+    for (const file of Array.from(files)) {
+      formData.append('images', file);
+    }
+
+    if (files.length === 1 && elements.imageName.value.trim()) {
+      formData.append('name', elements.imageName.value.trim());
+    }
+    if (elements.imageFormat.value) {
+      formData.append('format', elements.imageFormat.value);
+    }
 
     const { blob, filename } = await API.optimize(formData);
-
     Utils.downloadBlob(blob, filename);
 
-    const diff = file.size - blob.size;
+    const totalOriginalSize = Array.from(files).reduce((acc, f) => acc + f.size, 0);
+    const diff = totalOriginalSize - blob.size;
     const savingsText = diff > 0
-      ? `Saved ${Utils.formatSize(diff)} (${Math.round((diff / file.size) * 100)}%)`
+      ? `Saved ${Utils.formatSize(diff)} (${Math.round((diff / totalOriginalSize) * 100)}%)`
       : `Processed successfully (${Utils.formatSize(blob.size)})`;
 
     UI.showToast('success', `
       <strong>${filename}</strong> downloaded!<br>
-      Check your Downloads folder.<br>
       <span class="mt-1 inline-block opacity-80 text-xs font-mono uppercase tracking-wider">${savingsText}</span>
     `);
 

@@ -30,6 +30,7 @@
     "@tailwindcss/vite": "^4.2.1",
     "concurrently": "^9.2.1",
     "fastify": "^5.7.4",
+    "jszip": "^3.10.1",
     "sharp": "^0.34.5",
     "tailwindcss": "^4.2.1",
     "typescript": "^5.9.3",
@@ -37,6 +38,7 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@types/jszip": "^3.4.0",
     "@types/node": "^25.3.2",
     "tsx": "^4.21.0"
   },
