@@ -1,6 +1,8 @@
 import fastify from 'fastify';
 import multipart from '@fastify/multipart';
 import fastifyStatic from '@fastify/static';
+import fastifyRateLimit from '@fastify/rate-limit';
+import fastifyCors from '@fastify/cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import optimizeRoute from './routes/optimize.js';
@@ -8,36 +10,49 @@ import optimizeRoute from './routes/optimize.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// --- Constants & Config ---
 const PORT = Number(process.env.PORT) || 3000;
 const HOST = process.env.NODE_ENV === 'production' ? '0.0.0.0' : 'localhost';
-const FILE_SIZE_LIMIT = 10 * 1024 * 1024; // 10MB
-
-// Determine static folder (dist/client)
-// In prod (dist/server/server.js), it's in ../client relative to this file
+const FILE_SIZE_LIMIT = 10 * 1024 * 1024;
 
 const clientPath = process.env.NODE_ENV === 'production'
   ? path.join(__dirname, '..', 'client')
   : path.join(__dirname, '..', 'dist', 'client');
 
-// --- Server Initialization ---
 const server = fastify({
-  logger: process.env.NODE_ENV !== 'production',
-  disableRequestLogging: process.env.NODE_ENV === 'production'
+  logger: process.env.NODE_ENV === 'production'
+    ? { level: 'error' }
+    : { level: 'info' },
+  disableRequestLogging: process.env.NODE_ENV === 'production',
+  requestTimeout: 30000,
+  maxParamLength: 500,
 });
 
-// Middleware & Plugins
+await server.register(fastifyRateLimit, {
+  max: 100,
+  timeWindow: '1 minute',
+  errorResponseBuilder: () => ({
+    error: 'Too many requests',
+    message: 'Rate limit exceeded. Please try again later.',
+    statusCode: 429
+  })
+});
+
+await server.register(fastifyCors, {
+  origin: process.env.CORS_ORIGIN ?? true,
+  credentials: true,
+});
+
 server.register(multipart, {
-  limits: { fileSize: FILE_SIZE_LIMIT }
+  limits: {
+    fileSize: FILE_SIZE_LIMIT,
+    files: 20
+  }
 });
 
-// API Routes
 server.register(optimizeRoute);
 
-// Health Check
 server.get('/health', async () => ({ status: 'ok', timestamp: new Date().toISOString() }));
 
-// Serve static files (registered AFTER routes for lower priority)
 server.register(fastifyStatic, {
   root: clientPath,
   prefix: '/',
@@ -45,20 +60,17 @@ server.register(fastifyStatic, {
   maxAge: 3600,
 });
 
-// Set a simple root handler if index.html is not automatically served
 server.get('/', (_request, reply) => {
   return reply.sendFile('index.html');
 });
 
-// Catch-all to support SPA routing if needed
 server.setNotFoundHandler((_request, reply) => {
   return reply.sendFile('index.html');
 });
 
-// --- Lifecycle ---
 const start = async () => {
   try {
-    await server.listen({ port: PORT, host: '0.0.0.0' });
+    await server.listen({ port: PORT, host: HOST });
     console.log(`🚀 Optimizer API & Client running on ${HOST}:${PORT}`);
   } catch (err) {
     server.log.error(err);

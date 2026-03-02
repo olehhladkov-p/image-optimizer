@@ -1,5 +1,4 @@
 import { defineConfig } from 'vite';
-import path from 'path';
 import tailwindcss from '@tailwindcss/vite'
 
 export default defineConfig({
@@ -11,11 +10,6 @@ export default defineConfig({
         target: 'http://localhost:3000',
         changeOrigin: true,
       },
-    },
-  },
-  resolve: {
-    alias: {
-      '@shared': path.resolve(__dirname, './shared'),
     },
   },
   build: {
