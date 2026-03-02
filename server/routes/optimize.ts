@@ -1,72 +1,107 @@
-import { FastifyPluginAsync } from 'fastify';
-import { optimizeSchema } from '../../shared/types.js';
+import { FastifyPluginAsync, FastifyRequest, FastifyReply } from 'fastify';
+import { ValidationService } from '../services/validation.service.js';
 import { ImageService } from '../services/image.service.js';
 import { FileUtils } from '../utils/file.utils.js';
 import JSZip from 'jszip';
 
-/** Handles image optimization requests (Controller / Route) */
+interface ParsedFile {
+  buffer: Buffer;
+  name: string;
+  ext: string;
+  mimeType: string;
+}
+
+interface ProcessResult {
+  buffer: Buffer;
+  contentType: string;
+  filename: string;
+}
+
+interface RequestData {
+  files: ParsedFile[];
+  formData: Record<string, string>;
+}
+
+const parseRequest = async (request: FastifyRequest): Promise<RequestData> => {
+  const files: ParsedFile[] = [];
+  const formData: Record<string, string> = {};
+
+  for await (const part of request.parts()) {
+    if (part.type === 'file') {
+      const { name, ext } = FileUtils.parseFileName(part.filename);
+      files.push({
+        buffer: await part.toBuffer(),
+        name,
+        ext,
+        mimeType: part.mimetype ?? ''
+      });
+    } else {
+      formData[part.fieldname] = part.value as string;
+    }
+  }
+
+  return { files, formData };
+};
+
+const processSingleFile = async (file: ParsedFile, formData: Record<string, string>): Promise<ProcessResult> => {
+  const targetFormat = formData['format'] || file.ext;
+  const finalName = ValidationService.sanitizeFilename(formData['name'] || file.name, 'optimized');
+  const optimizedBuffer = await ImageService.process(file.buffer, targetFormat);
+
+  const filename = `${finalName}.${targetFormat || 'jpeg'}`;
+  return {
+    buffer: optimizedBuffer,
+    contentType: `image/${targetFormat || 'jpeg'}`,
+    filename
+  };
+};
+
+const processMultipleFiles = async (files: ParsedFile[], formData: Record<string, string>): Promise<ProcessResult> => {
+  const zip = new JSZip();
+  const format = formData['format'];
+
+  await Promise.all(
+    files.map(async (file) => {
+      const targetFormat = format || file.ext;
+      const optimizedBuffer = await ImageService.process(file.buffer, targetFormat);
+      const safeName = ValidationService.sanitizeFilename(file.name, 'image');
+      zip.file(`${safeName}.${targetFormat || 'jpeg'}`, optimizedBuffer);
+    })
+  );
+
+  return {
+    buffer: await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE', compressionOptions: { level: 6 } }),
+    contentType: 'application/zip',
+    filename: 'optimized.zip'
+  };
+};
+
+const handleOptimizationError = (error: unknown, reply: FastifyReply) => {
+  const message = error instanceof Error ? error.message : 'Failed to optimize images';
+  const statusCode = error instanceof Error && (message.includes('Invalid') || message.includes('No images')) ? 400 : 500;
+  return reply.status(statusCode).send({ error: message });
+};
+
 const optimizeRoute: FastifyPluginAsync = async (server) => {
-  server.post('/optimize', async (request, reply) => {
-    const files: Array<{ buffer: Buffer; name: string; ext: string }> = [];
-    const parsedBody: Record<string, string> = {};
-
+  server.post('/optimize', async (request: FastifyRequest, reply: FastifyReply) => {
     try {
-      // 1. Multipart Parsing
-      for await (const part of request.parts()) {
-        if (part.type === 'file') {
-          const buffer = await part.toBuffer();
-          const { name, ext } = FileUtils.parseFileName(part.filename);
-          files.push({ buffer, name, ext });
-        } else {
-          parsedBody[part.fieldname] = part.value as string;
-        }
-      }
+      const { files, formData } = await parseRequest(request);
 
-      if (files.length === 0) {
-        return reply.status(400).send({ error: 'No images provided' });
-      }
+      ValidationService.validateFiles(files);
+      ValidationService.validateFormData(formData);
 
-      // 2. Validation
-      const validation = optimizeSchema.safeParse(parsedBody);
-      if (!validation.success) {
-        return reply.status(400).send({ error: validation.error.issues[0]?.message || 'Invalid input' });
-      }
+      const result = files.length === 1
+        ? await processSingleFile(files[0]!, formData)
+        : await processMultipleFiles(files, formData);
 
-      const { name, format } = validation.data;
+      const encodedFilename = encodeURIComponent(result.filename);
 
-      // 3. Single File Optimization (Backward Compatibility)
-      if (files.length === 1) {
-        const file = files[0];
-        const targetFormat = format || file.ext;
-        const finalName = name || file.name || 'optimized';
-        const optimizedBuffer = await ImageService.process(file.buffer, targetFormat);
-
-        reply.header('Content-Type', `image/${targetFormat || 'jpeg'}`);
-        reply.header('Content-Disposition', `attachment; filename="${finalName}.${targetFormat || 'jpeg'}"`);
-        return reply.send(optimizedBuffer);
-      }
-
-      // 4. Multiple File Optimization (ZIP)
-      const zip = new JSZip();
-
-      await Promise.all(
-        files.map(async (file) => {
-          const targetFormat = format || file.ext;
-          const optimizedBuffer = await ImageService.process(file.buffer, targetFormat);
-          zip.file(`${file.name}.${targetFormat || 'jpeg'}`, optimizedBuffer);
-        })
-      );
-
-      const zipBuffer = await zip.generateAsync({ type: 'nodebuffer' });
-
-      reply.header('Content-Type', 'application/zip');
-      reply.header('Content-Disposition', 'attachment; filename="optimized.zip"');
-      return reply.send(zipBuffer);
-
+      return reply
+        .header('Content-Type', result.contentType)
+        .header('Content-Disposition', `attachment; filename="${result.filename}"; filename*=UTF-8''${encodedFilename}`)
+        .send(result.buffer);
     } catch (error) {
-      server.log.error(error);
-      const message = error instanceof Error ? error.message : 'Failed to optimize images';
-      return reply.status(500).send({ error: message });
+      return handleOptimizationError(error, reply);
     }
   });
 };
